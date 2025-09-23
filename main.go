@@ -19,18 +19,24 @@ const (
 type model struct {
 	width, height int
 
-	leftDir   string
-	rightDir  string
-	leftFiles []os.DirEntry
+	leftDir    string
+	rightDir   string
+	leftFiles  []os.DirEntry
 	rightFiles []os.DirEntry
 
 	cursorLeft  int
 	cursorRight int
+	offsetLeft  int
+	offsetRight int
 	activePane  string
 
-	showTerminal bool
-	termInput    string
-	termOutput   []string
+	// терминал
+	termInput   string
+	termCursor  int
+	termOutput  []string
+	termHistory []string
+	historyPos  int
+	termOffset  int // для скролла PageUp/PageDown
 }
 
 func initialModel() model {
@@ -43,6 +49,8 @@ func initialModel() model {
 		leftFiles:   files,
 		rightFiles:  files,
 		termOutput:  []string{"Терминал готов"},
+		historyPos:  -1,
+		termOffset:  0,
 	}
 }
 
@@ -59,42 +67,124 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+q":
 			return m, tea.Quit
 
-		case "left":
+		case "tab":
 			if m.activePane == "left" {
-				m.leftDir = parentDir(m.leftDir)
-				m.leftFiles, _ = os.ReadDir(m.leftDir)
-				m.cursorLeft = 0
+				m.activePane = "right"
+			} else if m.activePane == "right" {
+				m.activePane = "terminal"
 			} else {
-				m.rightDir = parentDir(m.rightDir)
-				m.rightFiles, _ = os.ReadDir(m.rightDir)
-				m.cursorRight = 0
+				m.activePane = "left"
 			}
 
+		// ---------- left ----------
+		case "left":
+			if m.activePane == "terminal" {
+				if m.termCursor > 0 {
+					m.termCursor--
+				}
+			} else if m.activePane == "left" {
+				m.leftDir = parentDir(m.leftDir)
+				m.leftFiles, _ = os.ReadDir(m.leftDir)
+				m.cursorLeft, m.offsetLeft = 0, 0
+			} else if m.activePane == "right" {
+				m.rightDir = parentDir(m.rightDir)
+				m.rightFiles, _ = os.ReadDir(m.rightDir)
+				m.cursorRight, m.offsetRight = 0, 0
+			}
+
+		// ---------- right ----------
 		case "right":
-			if m.activePane == "left" {
+			if m.activePane == "terminal" {
+				if m.termCursor < len(m.termInput) {
+					m.termCursor++
+				}
+			} else if m.activePane == "left" {
 				m = enterItem(m, true)
-			} else {
+			} else if m.activePane == "right" {
 				m = enterItem(m, false)
 			}
 
+		// ---------- up ----------
 		case "up":
 			if m.activePane == "left" && m.cursorLeft > 0 {
 				m.cursorLeft--
+				if m.cursorLeft < m.offsetLeft {
+					m.offsetLeft--
+				}
 			} else if m.activePane == "right" && m.cursorRight > 0 {
 				m.cursorRight--
+				if m.cursorRight < m.offsetRight {
+					m.offsetRight--
+				}
+			} else if m.activePane == "terminal" {
+				if m.historyPos < len(m.termHistory)-1 {
+					m.historyPos++
+					m.termInput = m.termHistory[len(m.termHistory)-1-m.historyPos]
+					m.termCursor = len(m.termInput)
+				}
 			}
 
+		// ---------- down ----------
 		case "down":
 			if m.activePane == "left" && m.cursorLeft < len(m.leftFiles)-1 {
 				m.cursorLeft++
+				if m.cursorLeft >= m.offsetLeft+(m.height/2+4-2) {
+					m.offsetLeft++
+				}
 			} else if m.activePane == "right" && m.cursorRight < len(m.rightFiles)-1 {
 				m.cursorRight++
+				if m.cursorRight >= m.offsetRight+(m.height/2+4-2) {
+					m.offsetRight++
+				}
+			} else if m.activePane == "terminal" {
+				if m.historyPos > 0 {
+					m.historyPos--
+					m.termInput = m.termHistory[len(m.termHistory)-1-m.historyPos]
+					m.termCursor = len(m.termInput)
+				} else {
+					m.historyPos = -1
+					m.termInput = ""
+					m.termCursor = 0
+				}
 			}
 
-		case "alt+left":
-			m.activePane = "left"
-		case "alt+right":
-			m.activePane = "right"
+		// ---------- скролл терминала ----------
+		case "pgup":
+			if m.termOffset < len(m.termOutput)-1 {
+				m.termOffset++
+			}
+		case "pgdown":
+			if m.termOffset > 0 {
+				m.termOffset--
+			}
+
+		// ---------- работа с терминалом ----------
+		case "enter":
+			if m.activePane == "terminal" {
+				cmd := strings.TrimSpace(m.termInput)
+				if cmd != "" {
+					m.termOutput = append(m.termOutput, "> "+cmd)
+					m.termHistory = append(m.termHistory, cmd)
+				}
+				m.termInput = ""
+				m.termCursor = 0
+				m.historyPos = -1
+				m.termOffset = 0
+			}
+		case "backspace":
+			if m.activePane == "terminal" && m.termCursor > 0 {
+				m.termInput = m.termInput[:m.termCursor-1] + m.termInput[m.termCursor:]
+				m.termCursor--
+			}
+
+		default:
+			if m.activePane == "terminal" {
+				if msg.Type == tea.KeyRunes {
+					r := msg.Runes[0]
+					m.termInput = m.termInput[:m.termCursor] + string(r) + m.termInput[m.termCursor:]
+					m.termCursor++
+				}
+			}
 		}
 	}
 	return m, nil
@@ -106,10 +196,11 @@ func (m model) View() string {
 	}
 
 	panelW := m.width/2 - 2
-	panelH := m.height/2 + 4
+	panelH := m.height/2 + 2
+	termH := m.height - panelH - 2
 
-	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.activePane == "left", panelW, panelH)
-	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.activePane == "right", panelW, panelH)
+	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.activePane == "left", panelW, panelH)
+	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.activePane == "right", panelW, panelH)
 
 	linesL := strings.Split(left, "\n")
 	linesR := strings.Split(right, "\n")
@@ -119,10 +210,11 @@ func (m model) View() string {
 	}
 	ui := strings.Join(combined, "\n")
 
-	return ui
+	term := renderTerminal(m, m.width, termH)
+	return ui + "\n" + term
 }
 
-func renderPanel(path string, files []os.DirEntry, cursor int, active bool, w, h int) string {
+func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bool, w, h int) string {
 	border := "-"
 	color := gray
 	if active {
@@ -132,15 +224,26 @@ func renderPanel(path string, files []os.DirEntry, cursor int, active bool, w, h
 
 	var b strings.Builder
 	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
+
+	visibleFiles := files
+	if len(files) > h-2 {
+		end := offset + (h - 2)
+		if end > len(files) {
+			end = len(files)
+		}
+		visibleFiles = files[offset:end]
+	}
+
 	for i := 0; i < h-2; i++ {
 		var line string
-		if i < len(files) {
-			name := files[i].Name()
-			if files[i].IsDir() {
+		if i < len(visibleFiles) {
+			idx := offset + i
+			name := visibleFiles[i].Name()
+			if visibleFiles[i].IsDir() {
 				name += "/"
 			}
 			line = fmt.Sprintf(" %s", name)
-			if i == cursor {
+			if idx == cursor {
 				line = yellow + ">" + line + reset
 			}
 		}
@@ -151,6 +254,58 @@ func renderPanel(path string, files []os.DirEntry, cursor int, active bool, w, h
 			strings.Repeat(" ", w-2-len(stripANSI(line))) +
 			color + "|" + reset + "\n")
 	}
+
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
+	return b.String()
+}
+
+func renderTerminal(m model, w, h int) string {
+	border := "-"
+	color := gray
+	if m.activePane == "terminal" {
+		border = "="
+		color = green
+	}
+
+	var b strings.Builder
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
+
+	// вывод с учётом прокрутки
+	visible := h - 2
+	start := len(m.termOutput) - visible - m.termOffset
+	if start < 0 {
+		start = 0
+	}
+	end := start + visible
+	if end > len(m.termOutput) {
+		end = len(m.termOutput)
+	}
+	visibleLines := m.termOutput[start:end]
+
+	for i := 0; i < visible; i++ {
+		var line string
+		if i < len(visibleLines) {
+			line = visibleLines[i]
+		}
+		if len(stripANSI(line)) > w-2 {
+			line = line[:w-2]
+		}
+		b.WriteString(color + "|" + reset + line +
+			strings.Repeat(" ", w-2-len(stripANSI(line))) +
+			color + "|" + reset + "\n")
+	}
+
+	// строка ввода
+	input := m.termInput
+	cursor := m.termCursor
+	inputWithCursor := input[:cursor] + yellow + "▌" + reset + input[cursor:]
+	if len(stripANSI(inputWithCursor)) > w-2 {
+		inputWithCursor = inputWithCursor[len(inputWithCursor)-(w-2):]
+	}
+	b.WriteString(color + "|" + reset + "> "+inputWithCursor+
+		strings.Repeat(" ", w-2-len(stripANSI("> "+inputWithCursor)))+
+		color + "|" + reset + "\n")
+
 	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
 	return b.String()
 }
@@ -181,11 +336,11 @@ func enterItem(m model, left bool) model {
 		if left {
 			m.leftDir = path
 			m.leftFiles = newFiles
-			m.cursorLeft = 0
+			m.cursorLeft, m.offsetLeft = 0, 0
 		} else {
 			m.rightDir = path
 			m.rightFiles = newFiles
-			m.cursorRight = 0
+			m.cursorRight, m.offsetRight = 0, 0
 		}
 	} else {
 		m.termOutput = append(m.termOutput, fmt.Sprintf("Запуск файла: %s", path))
@@ -195,8 +350,7 @@ func enterItem(m model, left bool) model {
 }
 
 func parentDir(path string) string {
-	parent := filepath.Dir(path)
-	return parent
+	return filepath.Dir(path)
 }
 
 func stripANSI(s string) string {
