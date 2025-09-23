@@ -166,9 +166,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.termOutput = append(m.termOutput, "$ ")
 			}
 		default:
-			// ✅ Поддержка кириллицы и любых Unicode-символов
-			if m.focus == "terminal" && len(msg.Runes) > 0 {
-				m.termInput += string(msg.Runes)
+			if m.focus == "terminal" && len(msg.String()) == 1 {
+				m.termInput += msg.String()
 				m.termOutput[len(m.termOutput)-1] = "$ " + m.termInput
 			}
 		}
