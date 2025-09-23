@@ -38,6 +38,7 @@ type model struct {
 	termScroll   int
 	termHistory  []string
 	historyIndex int
+	termDir      string
 }
 
 func initialModel() model {
@@ -49,9 +50,10 @@ func initialModel() model {
 		rightDir:     wd,
 		leftFiles:    files,
 		rightFiles:   files,
-		termOutput:   []string{"Терминал готов. Введите `help` для списка команд."},
+		termOutput:   []string{"Терминал готов."},
 		termHistory:  []string{},
 		historyIndex: -1,
+		termDir:      wd,
 	}
 }
 
@@ -70,7 +72,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.termActive = false
 			case "enter":
 				cmd := string(m.termInput)
-				m.termOutput = append(m.termOutput, "$ "+cmd)
+				m.termOutput = append(m.termOutput, m.prompt()+cmd)
 				m.executeCommand(cmd)
 				if cmd != "" {
 					m.termHistory = append(m.termHistory, cmd)
@@ -118,6 +120,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.leftDir = parentDir(m.leftDir)
 					m.leftFiles, _ = os.ReadDir(m.leftDir)
 					m.cursorLeft, m.offsetLeft = 0, 0
+					m.termDir = m.leftDir
 				} else {
 					m.rightDir = parentDir(m.rightDir)
 					m.rightFiles, _ = os.ReadDir(m.rightDir)
@@ -126,6 +129,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "right":
 				if m.activePane == "left" {
 					m = enterItem(m, true)
+					m.termDir = m.leftDir
 				} else {
 					m = enterItem(m, false)
 				}
@@ -172,22 +176,10 @@ func (m *model) executeCommand(cmd string) {
 	}
 
 	switch parts[0] {
-	case "help":
-		m.termOutput = append(m.termOutput,
-			"Доступные команды:",
-			"  help   - список команд",
-			"  ls     - список файлов",
-			"  pwd    - текущая директория",
-			"  cd     - сменить директорию",
-			"  cat    - показать файл",
-			"  date   - текущая дата/время",
-			"  clear  - очистить экран",
-			"  echo   - вывести текст",
-			"  exit   - выйти")
 	case "pwd":
-		m.termOutput = append(m.termOutput, m.leftDir)
+		m.termOutput = append(m.termOutput, m.termDir)
 	case "ls":
-		files, _ := os.ReadDir(m.leftDir)
+		files, _ := os.ReadDir(m.termDir)
 		var names []string
 		for _, f := range files {
 			if f.IsDir() {
@@ -202,12 +194,13 @@ func (m *model) executeCommand(cmd string) {
 			m.termOutput = append(m.termOutput, "Укажите директорию")
 			return
 		}
-		newPath := filepath.Join(m.leftDir, parts[1])
+		newPath := filepath.Join(m.termDir, parts[1])
 		if st, err := os.Stat(newPath); err == nil && st.IsDir() {
+			m.termDir = newPath
 			m.leftDir = newPath
-			m.leftFiles, _ = os.ReadDir(m.leftDir)
+			m.leftFiles, _ = os.ReadDir(newPath)
 			m.cursorLeft, m.offsetLeft = 0, 0
-			m.termOutput = append(m.termOutput, "Текущая директория: "+m.leftDir)
+			m.termOutput = append(m.termOutput, "Текущая директория: "+m.termDir)
 		} else {
 			m.termOutput = append(m.termOutput, "Нет такой директории")
 		}
@@ -216,7 +209,7 @@ func (m *model) executeCommand(cmd string) {
 			m.termOutput = append(m.termOutput, "Укажите файл")
 			return
 		}
-		filePath := filepath.Join(m.leftDir, parts[1])
+		filePath := filepath.Join(m.termDir, parts[1])
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			m.termOutput = append(m.termOutput, "Ошибка: "+err.Error())
@@ -238,6 +231,14 @@ func (m *model) executeCommand(cmd string) {
 	}
 }
 
+func (m model) prompt() string {
+	base := filepath.Base(m.termDir)
+	if base == "" {
+		base = "/"
+	}
+	return base + " $ "
+}
+
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Загрузка..."
@@ -246,8 +247,8 @@ func (m model) View() string {
 	panelW := m.width/2 - 2
 	panelH := m.height/2 + 4
 
-	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.activePane == "left", panelW, panelH)
-	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.activePane == "right", panelW, panelH)
+	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.activePane == "left", m.termActive, panelW, panelH)
+	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.activePane == "right", m.termActive, panelW, panelH)
 
 	linesL := strings.Split(left, "\n")
 	linesR := strings.Split(right, "\n")
@@ -261,15 +262,15 @@ func (m model) View() string {
 	termH := m.height - panelH - 2
 	var termLines []string
 	start := 0
-	if len(m.termOutput) > termH-2 {
-		start = len(m.termOutput) - (termH - 2) - m.termScroll
+	if len(m.termOutput) > termH-3 {
+		start = len(m.termOutput) - (termH - 3) - m.termScroll
 		if start < 0 {
 			start = 0
 		}
 	}
 	visible := m.termOutput[start:]
-	if len(visible) > termH-2 {
-		visible = visible[:termH-2]
+	if len(visible) > termH-3 {
+		visible = visible[:termH-3]
 	}
 	border := gray
 	if m.termActive {
@@ -280,19 +281,23 @@ func (m model) View() string {
 		line := fitStringToWidth(l, m.width-2)
 		termLines = append(termLines, border+"|"+reset+line+border+"|"+reset)
 	}
-	// строка ввода
-	input := string(m.termInput)
-	input = fitStringToWidth(input, m.width-2)
-	termLines = append(termLines, border+"|"+reset+input+border+"|"+reset)
+	// строка ввода с курсором
+	input := m.prompt() + string(m.termInput)
+	cursor := yellow + "█" + reset
+	line := fitStringToWidth(input, m.width-2)
+	if runewidth.StringWidth(line)+1 <= m.width-2 {
+		line = line + cursor
+	}
+	termLines = append(termLines, border+"|"+reset+line+border+"|"+reset)
 	termLines = append(termLines, border+"+"+strings.Repeat("-", m.width-2)+"+"+reset)
 
 	return ui + "\n" + strings.Join(termLines, "\n")
 }
 
-func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bool, w, h int) string {
+func renderPanel(path string, files []os.DirEntry, cursor, offset int, active, termActive bool, w, h int) string {
 	border := "-"
 	color := gray
-	if active {
+	if active && !termActive {
 		border = "="
 		color = green
 	}
