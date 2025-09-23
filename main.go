@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 )
 
 const (
@@ -24,33 +26,33 @@ type model struct {
 	leftFiles  []os.DirEntry
 	rightFiles []os.DirEntry
 
-	cursorLeft  int
-	cursorRight int
-	offsetLeft  int
-	offsetRight int
-	activePane  string
+	cursorLeft   int
+	cursorRight  int
+	offsetLeft   int
+	offsetRight  int
+	activePane   string
 
 	// терминал
-	termInput   string
-	termCursor  int
-	termOutput  []string
-	termHistory []string
-	historyPos  int
-	termOffset  int // для скролла PageUp/PageDown
+	termActive     bool
+	termInput      []rune
+	termOutput     []string
+	termHistory    []string
+	termHistIndex  int
+	termScroll     int
 }
 
 func initialModel() model {
 	wd, _ := os.Getwd()
 	files, _ := os.ReadDir(wd)
 	return model{
-		activePane:  "left",
-		leftDir:     wd,
-		rightDir:    wd,
-		leftFiles:   files,
-		rightFiles:  files,
-		termOutput:  []string{"Терминал готов"},
-		historyPos:  -1,
-		termOffset:  0,
+		activePane:    "left",
+		leftDir:       wd,
+		rightDir:      wd,
+		leftFiles:     files,
+		rightFiles:    files,
+		termOutput:    []string{"Терминал готов"},
+		termHistory:   []string{},
+		termHistIndex: -1,
 	}
 }
 
@@ -63,128 +65,112 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+q":
-			return m, tea.Quit
-
-		case "tab":
-			if m.activePane == "left" {
-				m.activePane = "right"
-			} else if m.activePane == "right" {
-				m.activePane = "terminal"
-			} else {
-				m.activePane = "left"
-			}
-
-		// ---------- left ----------
-		case "left":
-			if m.activePane == "terminal" {
-				if m.termCursor > 0 {
-					m.termCursor--
+		if m.termActive {
+			switch msg.String() {
+			case "tab":
+				m.termActive = false
+			case "enter":
+				input := string(m.termInput)
+				m.termHistory = append(m.termHistory, input)
+				m.termHistIndex = -1
+				m.termOutput = append(m.termOutput, "> "+input)
+				m.termInput = nil
+				return m, execCommandCmd(input)
+			case "backspace":
+				if len(m.termInput) > 0 {
+					m.termInput = m.termInput[:len(m.termInput)-1]
 				}
-			} else if m.activePane == "left" {
-				m.leftDir = parentDir(m.leftDir)
-				m.leftFiles, _ = os.ReadDir(m.leftDir)
-				m.cursorLeft, m.offsetLeft = 0, 0
-			} else if m.activePane == "right" {
-				m.rightDir = parentDir(m.rightDir)
-				m.rightFiles, _ = os.ReadDir(m.rightDir)
-				m.cursorRight, m.offsetRight = 0, 0
-			}
-
-		// ---------- right ----------
-		case "right":
-			if m.activePane == "terminal" {
-				if m.termCursor < len(m.termInput) {
-					m.termCursor++
+			case "up":
+				if len(m.termHistory) > 0 {
+					if m.termHistIndex == -1 {
+						m.termHistIndex = len(m.termHistory) - 1
+					} else if m.termHistIndex > 0 {
+						m.termHistIndex--
+					}
+					m.termInput = []rune(m.termHistory[m.termHistIndex])
 				}
-			} else if m.activePane == "left" {
-				m = enterItem(m, true)
-			} else if m.activePane == "right" {
-				m = enterItem(m, false)
-			}
-
-		// ---------- up ----------
-		case "up":
-			if m.activePane == "left" && m.cursorLeft > 0 {
-				m.cursorLeft--
-				if m.cursorLeft < m.offsetLeft {
-					m.offsetLeft--
+			case "down":
+				if m.termHistIndex >= 0 {
+					if m.termHistIndex < len(m.termHistory)-1 {
+						m.termHistIndex++
+						m.termInput = []rune(m.termHistory[m.termHistIndex])
+					} else {
+						m.termHistIndex = -1
+						m.termInput = nil
+					}
 				}
-			} else if m.activePane == "right" && m.cursorRight > 0 {
-				m.cursorRight--
-				if m.cursorRight < m.offsetRight {
-					m.offsetRight--
+			case "pgup":
+				if m.termScroll < len(m.termOutput)-1 {
+					m.termScroll++
 				}
-			} else if m.activePane == "terminal" {
-				if m.historyPos < len(m.termHistory)-1 {
-					m.historyPos++
-					m.termInput = m.termHistory[len(m.termHistory)-1-m.historyPos]
-					m.termCursor = len(m.termInput)
+			case "pgdown":
+				if m.termScroll > 0 {
+					m.termScroll--
 				}
-			}
-
-		// ---------- down ----------
-		case "down":
-			if m.activePane == "left" && m.cursorLeft < len(m.leftFiles)-1 {
-				m.cursorLeft++
-				if m.cursorLeft >= m.offsetLeft+(m.height/2+4-2) {
-					m.offsetLeft++
-				}
-			} else if m.activePane == "right" && m.cursorRight < len(m.rightFiles)-1 {
-				m.cursorRight++
-				if m.cursorRight >= m.offsetRight+(m.height/2+4-2) {
-					m.offsetRight++
-				}
-			} else if m.activePane == "terminal" {
-				if m.historyPos > 0 {
-					m.historyPos--
-					m.termInput = m.termHistory[len(m.termHistory)-1-m.historyPos]
-					m.termCursor = len(m.termInput)
-				} else {
-					m.historyPos = -1
-					m.termInput = ""
-					m.termCursor = 0
-				}
-			}
-
-		// ---------- скролл терминала ----------
-		case "pgup":
-			if m.termOffset < len(m.termOutput)-1 {
-				m.termOffset++
-			}
-		case "pgdown":
-			if m.termOffset > 0 {
-				m.termOffset--
-			}
-
-		// ---------- работа с терминалом ----------
-		case "enter":
-			if m.activePane == "terminal" {
-				cmd := strings.TrimSpace(m.termInput)
-				if cmd != "" {
-					m.termOutput = append(m.termOutput, "> "+cmd)
-					m.termHistory = append(m.termHistory, cmd)
-				}
-				m.termInput = ""
-				m.termCursor = 0
-				m.historyPos = -1
-				m.termOffset = 0
-			}
-		case "backspace":
-			if m.activePane == "terminal" && m.termCursor > 0 {
-				m.termInput = m.termInput[:m.termCursor-1] + m.termInput[m.termCursor:]
-				m.termCursor--
-			}
-
-		default:
-			if m.activePane == "terminal" {
+			case " ":
+				m.termInput = append(m.termInput, ' ')
+			default:
 				if msg.Type == tea.KeyRunes {
-					r := msg.Runes[0]
-					m.termInput = m.termInput[:m.termCursor] + string(r) + m.termInput[m.termCursor:]
-					m.termCursor++
+					m.termInput = append(m.termInput, msg.Runes...)
 				}
 			}
+		} else {
+			switch msg.String() {
+			case "ctrl+q":
+				return m, tea.Quit
+			case "tab":
+				m.termActive = true
+			case "left":
+				if m.activePane == "left" {
+					m.leftDir = parentDir(m.leftDir)
+					m.leftFiles, _ = os.ReadDir(m.leftDir)
+					m.cursorLeft, m.offsetLeft = 0, 0
+				} else {
+					m.rightDir = parentDir(m.rightDir)
+					m.rightFiles, _ = os.ReadDir(m.rightDir)
+					m.cursorRight, m.offsetRight = 0, 0
+				}
+			case "right":
+				if m.activePane == "left" {
+					m = enterItem(m, true)
+				} else {
+					m = enterItem(m, false)
+				}
+			case "up":
+				if m.activePane == "left" && m.cursorLeft > 0 {
+					m.cursorLeft--
+					if m.cursorLeft < m.offsetLeft {
+						m.offsetLeft--
+					}
+				} else if m.activePane == "right" && m.cursorRight > 0 {
+					m.cursorRight--
+					if m.cursorRight < m.offsetRight {
+						m.offsetRight--
+					}
+				}
+			case "down":
+				if m.activePane == "left" && m.cursorLeft < len(m.leftFiles)-1 {
+					m.cursorLeft++
+					if m.cursorLeft >= m.offsetLeft+(m.height/2+4-2) {
+						m.offsetLeft++
+					}
+				} else if m.activePane == "right" && m.cursorRight < len(m.rightFiles)-1 {
+					m.cursorRight++
+					if m.cursorRight >= m.offsetRight+(m.height/2+4-2) {
+						m.offsetRight++
+					}
+				}
+			case "alt+left":
+				m.activePane = "left"
+			case "alt+right":
+				m.activePane = "right"
+			}
+		}
+	case commandOutputMsg:
+		lines := strings.Split(string(msg), "\n")
+		m.termOutput = append(m.termOutput, lines...)
+		if len(m.termOutput) > 1000 {
+			m.termOutput = m.termOutput[len(m.termOutput)-1000:]
 		}
 	}
 	return m, nil
@@ -196,11 +182,10 @@ func (m model) View() string {
 	}
 
 	panelW := m.width/2 - 2
-	panelH := m.height/2 + 2
-	termH := m.height - panelH - 2
+	panelH := m.height/2 + 4
 
-	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.activePane == "left", panelW, panelH)
-	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.activePane == "right", panelW, panelH)
+	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.activePane == "left" && !m.termActive, panelW, panelH)
+	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.activePane == "right" && !m.termActive, panelW, panelH)
 
 	linesL := strings.Split(left, "\n")
 	linesR := strings.Split(right, "\n")
@@ -210,8 +195,11 @@ func (m model) View() string {
 	}
 	ui := strings.Join(combined, "\n")
 
-	term := renderTerminal(m, m.width, termH)
-	return ui + "\n" + term
+	// терминал
+	termH := m.height - panelH - 2
+	ui += "\n" + renderTerminal(m.termOutput, m.termInput, m.termScroll, m.termActive, m.width-2, termH)
+
+	return ui
 }
 
 func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bool, w, h int) string {
@@ -247,67 +235,67 @@ func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bo
 				line = yellow + ">" + line + reset
 			}
 		}
-		if len(stripANSI(line)) > w-2 {
-			line = line[:w-2]
-		}
-		b.WriteString(color + "|" + reset + line +
-			strings.Repeat(" ", w-2-len(stripANSI(line))) +
-			color + "|" + reset + "\n")
+		line = fitStringToWidth(stripANSI(line), w-2)
+		b.WriteString(color + "|" + reset + line + color + "|" + reset + "\n")
 	}
 
 	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
 	return b.String()
 }
 
-func renderTerminal(m model, w, h int) string {
+func renderTerminal(output []string, input []rune, scroll int, active bool, w, h int) string {
 	border := "-"
 	color := gray
-	if m.activePane == "terminal" {
+	if active {
 		border = "="
 		color = green
 	}
 
 	var b strings.Builder
-	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
+	b.WriteString(color + "+" + strings.Repeat(border, w) + "+" + reset + "\n")
 
-	// вывод с учётом прокрутки
-	visible := h - 2
-	start := len(m.termOutput) - visible - m.termOffset
-	if start < 0 {
-		start = 0
+	start := 0
+	if len(output)-scroll > h-2 {
+		start = len(output) - scroll - (h - 2)
 	}
-	end := start + visible
-	if end > len(m.termOutput) {
-		end = len(m.termOutput)
-	}
-	visibleLines := m.termOutput[start:end]
+	visible := output[start : len(output)-scroll]
 
-	for i := 0; i < visible; i++ {
+	for i := 0; i < h-2; i++ {
 		var line string
-		if i < len(visibleLines) {
-			line = visibleLines[i]
+		if i < len(visible) {
+			line = visible[i]
 		}
-		if len(stripANSI(line)) > w-2 {
-			line = line[:w-2]
-		}
-		b.WriteString(color + "|" + reset + line +
-			strings.Repeat(" ", w-2-len(stripANSI(line))) +
-			color + "|" + reset + "\n")
+		line = fitStringToWidth(line, w)
+		b.WriteString(color + "|" + reset + line + color + "|" + reset + "\n")
 	}
 
-	// строка ввода
-	input := m.termInput
-	cursor := m.termCursor
-	inputWithCursor := input[:cursor] + yellow + "▌" + reset + input[cursor:]
-	if len(stripANSI(inputWithCursor)) > w-2 {
-		inputWithCursor = inputWithCursor[len(inputWithCursor)-(w-2):]
+	prompt := "> " + string(input)
+	if active {
+		prompt += "_"
 	}
-	b.WriteString(color + "|" + reset + "> "+inputWithCursor+
-		strings.Repeat(" ", w-2-len(stripANSI("> "+inputWithCursor)))+
-		color + "|" + reset + "\n")
+	prompt = fitStringToWidth(prompt, w)
+	b.WriteString(color + "|" + reset + prompt + color + "|" + reset + "\n")
 
-	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
+	b.WriteString(color + "+" + strings.Repeat(border, w) + "+" + reset)
 	return b.String()
+}
+
+func fitStringToWidth(s string, width int) string {
+	s = stripANSI(s)
+	out := ""
+	w := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > width {
+			break
+		}
+		out += string(r)
+		w += rw
+	}
+	if w < width {
+		out += strings.Repeat(" ", width-w)
+	}
+	return out
 }
 
 func enterItem(m model, left bool) model {
@@ -359,6 +347,22 @@ func stripANSI(s string) string {
 	s = strings.ReplaceAll(s, gray, "")
 	s = strings.ReplaceAll(s, yellow, "")
 	return s
+}
+
+// --- терминал эмуляция ---
+
+type commandOutputMsg string
+
+func execCommandCmd(input string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("bash", "-c", input)
+		cmd.Env = os.Environ()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return commandOutputMsg(string(out) + "\nОшибка: " + err.Error())
+		}
+		return commandOutputMsg(string(out))
+	}
 }
 
 func main() {
