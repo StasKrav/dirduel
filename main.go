@@ -32,13 +32,13 @@ type model struct {
 	offsetRight int
 	activePane  string
 
-	termActive   bool
-	termInput    string
-	termOutput   []string
-	termDir      string
-	termHistory  []string
-	termHistIdx  int
-	termScroll   int
+	termActive  bool
+	termInput   string
+	termOutput  []string
+	termDir     string
+	termHistory []string
+	termHistIdx int
+	termScroll  int
 }
 
 func initialModel() model {
@@ -59,52 +59,278 @@ func initialModel() model {
 
 func (m model) Init() tea.Cmd { return nil }
 
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func stripANSI(s string) string {
+	s = strings.ReplaceAll(s, reset, "")
+	s = strings.ReplaceAll(s, green, "")
+	s = strings.ReplaceAll(s, gray, "")
+	s = strings.ReplaceAll(s, yellow, "")
+	return s
+}
+
+/* ---------------- Rendering ---------------- */
+
+func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bool, w, h int) string {
+	borderChar := "-"
+	color := gray
+	if active {
+		borderChar = "="
+		color = green
+	}
+
+	repeat := w - 2
+	if repeat < 0 {
+		repeat = 0
+	}
+
+	var b strings.Builder
+	b.WriteString(color + "+" + strings.Repeat(borderChar, repeat) + "+" + reset + "\n")
+
+	title := fmt.Sprintf(" %s", filepath.Base(path))
+	if title == " " {
+		title = " /"
+	}
+	if runewidth.StringWidth(title) > repeat {
+		title = runewidth.Truncate(title, repeat, "")
+	}
+	b.WriteString(color + "|" + reset + title + strings.Repeat(" ", max(0, repeat-runewidth.StringWidth(title))) + color + "|" + reset + "\n")
+
+	visibleFiles := files
+	if len(files) > h-3 {
+		end := offset + (h - 3)
+		if end > len(files) {
+			end = len(files)
+		}
+		visibleFiles = files[offset:end]
+	}
+
+	for i := 0; i < h-3; i++ {
+		var line string
+		if i < len(visibleFiles) {
+			idx := offset + i
+			name := visibleFiles[i].Name()
+			if visibleFiles[i].IsDir() {
+				name += "/"
+			}
+			line = " " + name
+			if idx == cursor && active {
+				line = yellow + ">" + line + reset
+			}
+		}
+		disp := stripANSI(line)
+		if runewidth.StringWidth(disp) > repeat {
+			disp = runewidth.Truncate(disp, repeat, "")
+		}
+		pad := max(0, repeat-runewidth.StringWidth(disp))
+		b.WriteString(color + "|" + reset + disp + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
+	}
+
+	b.WriteString(color + "+" + strings.Repeat(borderChar, repeat) + "+" + reset)
+	return b.String()
+}
+
+func (m model) renderTerminal() []string {
+	panelH := m.height/2 + 4
+	termH := m.height - panelH - 1
+	if termH < 3 {
+		termH = 3
+	}
+
+	borderChar := "-"
+	color := gray
+	if m.termActive {
+		borderChar = "="
+		color = green
+	}
+
+	repeat := m.width - 2
+	if repeat < 0 {
+		repeat = 0
+	}
+
+	lines := []string{color + "+" + strings.Repeat(borderChar, repeat) + "+" + reset}
+
+	available := termH - 2
+	start := max(0, len(m.termOutput)-available-m.termScroll)
+	end := max(0, len(m.termOutput)-m.termScroll)
+	if start > end {
+		start = end
+	}
+	visible := m.termOutput[start:end]
+
+	for _, out := range visible {
+		disp := stripANSI(out)
+		if runewidth.StringWidth(disp) > repeat {
+			disp = runewidth.Truncate(disp, repeat, "")
+		}
+		pad := max(0, repeat-runewidth.StringWidth(disp))
+		lines = append(lines, color+"|"+reset+disp+strings.Repeat(" ", pad)+color+"|"+reset)
+	}
+
+	prompt := "$ " + m.termInput
+	if runewidth.StringWidth(stripANSI(prompt)) >= repeat {
+		trunc := runewidth.Truncate(stripANSI(prompt), max(0, repeat-1), "")
+		display := trunc + yellow + "█" + reset
+		lines = append(lines, color+"|"+reset+display+strings.Repeat(" ", max(0, repeat-runewidth.StringWidth(stripANSI(trunc))))+color+"|"+reset)
+	} else {
+		display := prompt + yellow + "█" + reset
+		lines = append(lines, color+"|"+reset+display+strings.Repeat(" ", max(0, repeat-runewidth.StringWidth(stripANSI(prompt))))+color+"|"+reset)
+	}
+
+	lines = append(lines, color+"+"+strings.Repeat(borderChar, repeat)+"+"+reset)
+	return lines
+}
+
+/* ---------------- Commands ---------------- */
+
+func (m *model) executeCommand(input string) {
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return
+	}
+	cmd := parts[0]
+	args := parts[1:]
+
+	switch cmd {
+	case "cd":
+		if len(args) == 0 {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				m.termDir = home
+			}
+			return
+		}
+		target := args[0]
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(m.termDir, target)
+		}
+		info, err := os.Stat(target)
+		if err != nil || !info.IsDir() {
+			m.termOutput = append(m.termOutput, "Нет такой директории: "+args[0])
+			return
+		}
+		m.termDir = target
+
+	case "pwd":
+		m.termOutput = append(m.termOutput, m.termDir)
+
+	case "ls":
+		dir := m.termDir
+		if len(args) > 0 {
+			d := args[0]
+			if !filepath.IsAbs(d) {
+				d = filepath.Join(m.termDir, d)
+			}
+			dir = d
+		}
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			m.termOutput = append(m.termOutput, "Ошибка: "+err.Error())
+			return
+		}
+		var names []string
+		for _, e := range ents {
+			n := e.Name()
+			if e.IsDir() {
+				n += "/"
+			}
+			names = append(names, n)
+		}
+		m.termOutput = append(m.termOutput, strings.Join(names, "  "))
+
+	case "clear":
+		m.termOutput = []string{}
+
+	default:
+		c := exec.Command(cmd, args...)
+		c.Dir = m.termDir
+		out, err := c.CombinedOutput()
+		if err != nil {
+			if len(out) > 0 {
+				lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+				m.termOutput = append(m.termOutput, lines...)
+			}
+			m.termOutput = append(m.termOutput, "Ошибка: "+err.Error())
+			return
+		}
+		if len(out) > 0 {
+			lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+			m.termOutput = append(m.termOutput, lines...)
+		}
+	}
+}
+
+/* ---------------- Update / View ---------------- */
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-
+		m.width = msg.Width
+		m.height = msg.Height
 	case tea.KeyMsg:
+		key := msg.String()
+
+		if key == "ctrl+q" {
+			return m, tea.Quit
+		}
+		if key == "tab" {
+			m.termActive = !m.termActive
+			return m, nil
+		}
+
 		if m.termActive {
-			switch msg.String() {
-			case "ctrl+q":
-				return m, tea.Quit
-			case "tab":
-				m.termActive = false
+			switch key {
 			case "enter":
-				input := strings.TrimSpace(m.termInput)
-				if input != "" {
-					if len(m.termHistory) == 0 || m.termHistory[len(m.termHistory)-1] != input {
-						m.termHistory = append(m.termHistory, input)
+				m.termOutput = append(m.termOutput, "$ "+m.termInput)
+				inputTrim := strings.TrimSpace(m.termInput)
+				if inputTrim != "" {
+					if len(m.termHistory) == 0 || m.termHistory[len(m.termHistory)-1] != m.termInput {
+						m.termHistory = append(m.termHistory, m.termInput)
 					}
 					m.termHistIdx = len(m.termHistory)
-					m.executeCommand(input)
+					m.executeCommand(m.termInput)
 				}
 				m.termInput = ""
+				m.termScroll = 0
 			case "backspace":
 				if len(m.termInput) > 0 {
-					m.termInput = m.termInput[:len(m.termInput)-1]
+					runes := []rune(m.termInput)
+					m.termInput = string(runes[:len(runes)-1])
 				}
 			case "up":
-				if len(m.termHistory) > 0 && m.termHistIdx > 0 {
-					m.termHistIdx--
-					m.termInput = m.termHistory[m.termHistIdx]
+				if len(m.termHistory) > 0 {
+					if m.termHistIdx == -1 {
+						m.termHistIdx = len(m.termHistory) - 1
+					} else if m.termHistIdx > 0 {
+						m.termHistIdx--
+					}
+					if m.termHistIdx >= 0 && m.termHistIdx < len(m.termHistory) {
+						m.termInput = m.termHistory[m.termHistIdx]
+					}
 				}
 			case "down":
-				if m.termHistIdx < len(m.termHistory)-1 {
-					m.termHistIdx++
-					m.termInput = m.termHistory[m.termHistIdx]
-				} else {
-					m.termHistIdx = len(m.termHistory)
-					m.termInput = ""
+				if m.termHistIdx != -1 {
+					if m.termHistIdx < len(m.termHistory)-1 {
+						m.termHistIdx++
+						m.termInput = m.termHistory[m.termHistIdx]
+					} else {
+						m.termHistIdx = -1
+						m.termInput = ""
+					}
 				}
-			case "pgup":
-				if m.termScroll < len(m.termOutput)-1 {
-					m.termScroll += 1
+			case "pgup", "pageup":
+				if m.termScroll < max(0, len(m.termOutput)-1) {
+					m.termScroll++
 				}
-			case "pgdown":
+			case "pgdown", "pagedown":
 				if m.termScroll > 0 {
-					m.termScroll -= 1
+					m.termScroll--
 				}
 			case " ":
 				m.termInput += " "
@@ -114,11 +340,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		} else {
-			switch msg.String() {
-			case "ctrl+q":
-				return m, tea.Quit
-			case "tab":
-				m.termActive = true
+			switch key {
 			case "alt+left":
 				m.activePane = "left"
 			case "alt+right":
@@ -177,13 +399,21 @@ func (m model) View() string {
 	panelW := m.width/2 - 2
 	panelH := m.height/2 + 4
 
-	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, !m.termActive && m.activePane == "left", panelW, panelH)
-	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, !m.termActive && m.activePane == "right", panelW, panelH)
+	leftS := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, !m.termActive && m.activePane == "left", panelW, panelH)
+	rightS := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, !m.termActive && m.activePane == "right", panelW, panelH)
 
-	linesL := strings.Split(left, "\n")
-	linesR := strings.Split(right, "\n")
+	linesL := strings.Split(leftS, "\n")
+	linesR := strings.Split(rightS, "\n")
+	maxLines := max(len(linesL), len(linesR))
+	for len(linesL) < maxLines {
+		linesL = append(linesL, strings.Repeat(" ", panelW))
+	}
+	for len(linesR) < maxLines {
+		linesR = append(linesR, strings.Repeat(" ", panelW))
+	}
+
 	var combined []string
-	for i := 0; i < len(linesL); i++ {
+	for i := 0; i < maxLines; i++ {
 		combined = append(combined, linesL[i]+"  "+linesR[i])
 	}
 	ui := strings.Join(combined, "\n")
@@ -192,158 +422,19 @@ func (m model) View() string {
 	return ui + "\n" + strings.Join(termLines, "\n")
 }
 
-func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bool, w, h int) string {
-	borderChar := "-"
-	color := gray
-	if active {
-		borderChar = "="
-		color = green
-	}
-
-	repeat := w - 2
-	if repeat < 0 {
-		repeat = 0
-	}
-
-	var b strings.Builder
-	b.WriteString(color + "+" + strings.Repeat(borderChar, repeat) + "+" + reset + "\n")
-
-	visibleFiles := files
-	if len(files) > h-2 {
-		end := offset + (h - 2)
-		if end > len(files) {
-			end = len(files)
-		}
-		visibleFiles = files[offset:end]
-	}
-
-	for i := 0; i < h-2; i++ {
-		var line string
-		if i < len(visibleFiles) {
-			idx := offset + i
-			name := visibleFiles[i].Name()
-			if visibleFiles[i].IsDir() {
-				name += "/"
-			}
-			line = fmt.Sprintf(" %s", name)
-			if idx == cursor {
-				line = yellow + ">" + line + reset
-			}
-		}
-		if runewidth.StringWidth(stripANSI(line)) > w-2 {
-			line = runewidth.Truncate(stripANSI(line), w-2, "")
-		}
-		b.WriteString(color + "|" + reset + line +
-			strings.Repeat(" ", max(0, w-2-runewidth.StringWidth(stripANSI(line)))) +
-			color + "|" + reset + "\n")
-	}
-
-	b.WriteString(color + "+" + strings.Repeat(borderChar, repeat) + "+" + reset)
-	return b.String()
-}
-
-func (m model) renderTerminal() []string {
-	h := m.height/2 - 4
-	borderChar := "-"
-	color := gray
-	if m.termActive {
-		borderChar = "="
-		color = green
-	}
-
-	lines := []string{color + "+" + strings.Repeat(borderChar, max(0, m.width-2)) + "+" + reset}
-
-	start := max(0, len(m.termOutput)-h+m.termScroll)
-	end := max(0, len(m.termOutput)-m.termScroll)
-	if start > end {
-		start = end
-	}
-	visible := m.termOutput[start:end]
-
-	for _, out := range visible {
-		if runewidth.StringWidth(out) > m.width-2 {
-			out = runewidth.Truncate(out, m.width-2, "")
-		}
-		lines = append(lines, color+"|"+reset+out+
-			strings.Repeat(" ", max(0, m.width-2-runewidth.StringWidth(out)))+
-			color+"|"+reset)
-	}
-
-	input := "$ " + m.termInput
-	cursor := yellow + "█" + reset
-	if runewidth.StringWidth(input) < m.width-2 {
-		input = input + cursor
-	} else {
-		input = runewidth.Truncate(input, m.width-3, "") + cursor
-	}
-	lines = append(lines, color+"|"+reset+input+
-		strings.Repeat(" ", max(0, m.width-2-runewidth.StringWidth(input)))+
-		color+"|"+reset)
-
-	lines = append(lines, color+"+"+strings.Repeat(borderChar, max(0, m.width-2))+"+"+reset)
-
-	return lines
-}
-
-func (m *model) executeCommand(input string) {
-	parts := strings.Fields(input)
-	if len(parts) == 0 {
-		return
-	}
-
-	cmd := parts[0]
-	args := parts[1:]
-
-	switch cmd {
-	case "cd":
-		if len(args) > 0 {
-			newPath := args[0]
-			if !filepath.IsAbs(newPath) {
-				newPath = filepath.Join(m.termDir, newPath)
-			}
-			if fi, err := os.Stat(newPath); err == nil && fi.IsDir() {
-				m.termDir = newPath
-			} else {
-				m.termOutput = append(m.termOutput, "Нет такого каталога: "+newPath)
-			}
-		}
-	case "pwd":
-		m.termOutput = append(m.termOutput, m.termDir)
-	case "ls":
-		files, err := os.ReadDir(m.termDir)
-		if err != nil {
-			m.termOutput = append(m.termOutput, "Ошибка: "+err.Error())
-			return
-		}
-		var names []string
-		for _, f := range files {
-			name := f.Name()
-			if f.IsDir() {
-				name += "/"
-			}
-			names = append(names, name)
-		}
-		m.termOutput = append(m.termOutput, strings.Join(names, "  "))
-	default:
-		out, err := exec.Command(cmd, args...).CombinedOutput()
-		if err != nil {
-			m.termOutput = append(m.termOutput, "Ошибка: "+err.Error())
-		}
-		if len(out) > 0 {
-			m.termOutput = append(m.termOutput, strings.Split(strings.TrimSpace(string(out)), "\n")...)
-		}
-	}
-}
-
 func enterItem(m model, left bool) model {
 	var dir string
 	var files []os.DirEntry
 	var cursor int
 
 	if left {
-		dir, files, cursor = m.leftDir, m.leftFiles, m.cursorLeft
+		dir = m.leftDir
+		files = m.leftFiles
+		cursor = m.cursorLeft
 	} else {
-		dir, files, cursor = m.rightDir, m.rightFiles, m.cursorRight
+		dir = m.rightDir
+		files = m.rightFiles
+		cursor = m.cursorRight
 	}
 
 	if cursor >= len(files) {
@@ -355,9 +446,13 @@ func enterItem(m model, left bool) model {
 	if item.IsDir() {
 		newFiles, _ := os.ReadDir(path)
 		if left {
-			m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft = path, newFiles, 0, 0
+			m.leftDir = path
+			m.leftFiles = newFiles
+			m.cursorLeft, m.offsetLeft = 0, 0
 		} else {
-			m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight = path, newFiles, 0, 0
+			m.rightDir = path
+			m.rightFiles = newFiles
+			m.cursorRight, m.offsetRight = 0, 0
 		}
 	} else {
 		m.termOutput = append(m.termOutput, fmt.Sprintf("Запуск файла: %s", path))
@@ -368,20 +463,6 @@ func enterItem(m model, left bool) model {
 
 func parentDir(path string) string {
 	return filepath.Dir(path)
-}
-
-func stripANSI(s string) string {
-	for _, code := range []string{reset, green, gray, yellow} {
-		s = strings.ReplaceAll(s, code, "")
-	}
-	return s
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func main() {
