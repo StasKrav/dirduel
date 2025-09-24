@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -21,23 +22,18 @@ const (
 type model struct {
 	width, height int
 
-	leftDir    string
-	rightDir   string
-	leftFiles  []os.DirEntry
-	rightFiles []os.DirEntry
+	leftDir, rightDir   string
+	leftFiles, rightFiles []os.DirEntry
 
-	cursorLeft   int
-	cursorRight  int
-	offsetLeft   int
-	offsetRight  int
-	activePane   string
-	focus        string // "left", "right", "terminal"
+	cursorLeft, cursorRight int
+	offsetLeft, offsetRight int
+	activePane, focus       string // "left", "right", "terminal"
 
-	termInput     string
+	termInput     []rune
+	termCursorPos int
 	termOutput    []string
 	history       []string
 	historyIndex  int
-	termScrollPos int
 }
 
 func initialModel() model {
@@ -50,7 +46,7 @@ func initialModel() model {
 		rightDir:     wd,
 		leftFiles:    files,
 		rightFiles:   files,
-		termOutput:   []string{"$ "},
+		termOutput:   []string{},
 		history:      []string{},
 		historyIndex: -1,
 	}
@@ -66,32 +62,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+q":
+		switch msg.Type {
+
+		// global
+		case tea.KeyCtrlC:
 			return m, tea.Quit
 
-		// переключение фокуса
-		case "tab":
+		case tea.KeyTab:
 			if m.focus == "terminal" {
 				m.focus = m.activePane
 			} else {
 				m.focus = "terminal"
+				m.termCursorPos = len(m.termInput)
 			}
 
-		// управление панелями
-		case "alt+left":
-			if m.focus != "terminal" {
-				m.activePane = "left"
-				m.focus = "left"
+		// Left / Right with Alt = switch active panel
+		case tea.KeyLeft:
+			if msg.Alt {
+				if m.focus != "terminal" {
+					m.activePane = "left"
+					m.focus = "left"
+				}
+				break
 			}
-		case "alt+right":
-			if m.focus != "terminal" {
-				m.activePane = "right"
-				m.focus = "right"
+			// normal Left
+			if m.focus == "terminal" {
+				if m.termCursorPos > 0 {
+					m.termCursorPos--
+				}
+			} else if m.focus == "left" {
+				m.leftDir = parentDir(m.leftDir)
+				m.leftFiles, _ = os.ReadDir(m.leftDir)
+				m.cursorLeft, m.offsetLeft = 0, 0
+			} else if m.focus == "right" {
+				m.rightDir = parentDir(m.rightDir)
+				m.rightFiles, _ = os.ReadDir(m.rightDir)
+				m.cursorRight, m.offsetRight = 0, 0
 			}
 
-		// навигация в панелях
-		case "up":
+		case tea.KeyRight:
+			if msg.Alt {
+				if m.focus != "terminal" {
+					m.activePane = "right"
+					m.focus = "right"
+				}
+				break
+			}
+			if m.focus == "terminal" {
+				if m.termCursorPos < len(m.termInput) {
+					m.termCursorPos++
+				}
+			} else if m.focus == "left" {
+				m = enterItem(m, true)
+			} else if m.focus == "right" {
+				m = enterItem(m, false)
+			}
+
+		// Up / Down (panels navigation or terminal history)
+		case tea.KeyUp:
 			if m.focus == "left" && m.cursorLeft > 0 {
 				m.cursorLeft--
 				if m.cursorLeft < m.offsetLeft {
@@ -104,11 +132,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.focus == "terminal" && m.historyIndex > 0 {
 				m.historyIndex--
-				m.termInput = m.history[m.historyIndex]
-				m.termOutput[len(m.termOutput)-1] = "$ " + m.termInput
+				m.termInput = []rune(m.history[m.historyIndex])
+				m.termCursorPos = len(m.termInput)
 			}
 
-		case "down":
+		case tea.KeyDown:
 			if m.focus == "left" && m.cursorLeft < len(m.leftFiles)-1 {
 				m.cursorLeft++
 				if m.cursorLeft >= m.offsetLeft+(m.height/2+4-2) {
@@ -121,55 +149,74 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.focus == "terminal" && m.historyIndex < len(m.history)-1 {
 				m.historyIndex++
-				m.termInput = m.history[m.historyIndex]
-				m.termOutput[len(m.termOutput)-1] = "$ " + m.termInput
+				m.termInput = []rune(m.history[m.historyIndex])
+				m.termCursorPos = len(m.termInput)
 			} else if m.focus == "terminal" {
 				m.historyIndex = len(m.history)
-				m.termInput = ""
-				m.termOutput[len(m.termOutput)-1] = "$ "
+				m.termInput = []rune{}
+				m.termCursorPos = 0
 			}
 
-		case "left":
-			if m.focus == "left" {
-				m.leftDir = parentDir(m.leftDir)
-				m.leftFiles, _ = os.ReadDir(m.leftDir)
-				m.cursorLeft, m.offsetLeft = 0, 0
-			} else if m.focus == "right" {
-				m.rightDir = parentDir(m.rightDir)
-				m.rightFiles, _ = os.ReadDir(m.rightDir)
-				m.cursorRight, m.offsetRight = 0, 0
+		// editing / typing
+		case tea.KeyBackspace:
+			if m.focus == "terminal" && m.termCursorPos > 0 {
+				r := m.termInput
+				r = append(r[:m.termCursorPos-1], r[m.termCursorPos:]...)
+				m.termInput = r
+				m.termCursorPos--
 			}
 
-		case "right":
-			if m.focus == "left" {
+		case tea.KeyDelete:
+			if m.focus == "terminal" && m.termCursorPos < len(m.termInput) {
+				r := m.termInput
+				r = append(r[:m.termCursorPos], r[m.termCursorPos+1:]...)
+				m.termInput = r
+			}
+
+		case tea.KeySpace:
+			if m.focus == "terminal" {
+				before := append([]rune{}, m.termInput[:m.termCursorPos]...)
+				after := append([]rune{}, m.termInput[m.termCursorPos:]...)
+				m.termInput = append(before, append([]rune{' '}, after...)...)
+				m.termCursorPos++
+			}
+
+		case tea.KeyRunes:
+			if m.focus == "terminal" {
+				r := msg.Runes // []rune
+				before := append([]rune{}, m.termInput[:m.termCursorPos]...)
+				after := append([]rune{}, m.termInput[m.termCursorPos:]...)
+				m.termInput = append(before, append(r, after...)...)
+				m.termCursorPos += len(r)
+			}
+
+		case tea.KeyEnter:
+			if m.focus == "terminal" {
+				cmd := strings.TrimSpace(string(m.termInput))
+				if cmd != "" {
+					// показываем введённую команду
+					m.termOutput = append(m.termOutput, "$ "+cmd)
+
+					// выполняем
+					result := runCommand(cmd)
+					if result != "" {
+						for _, line := range strings.Split(strings.TrimRight(result, "\n"), "\n") {
+							m.termOutput = append(m.termOutput, line)
+						}
+					}
+
+					// добавляем в историю
+					m.history = append(m.history, cmd)
+				}
+
+				// сброс
+				m.termInput = []rune{}
+				m.termCursorPos = 0
+				m.historyIndex = len(m.history)
+			} else if m.focus == "left" {
 				m = enterItem(m, true)
 			} else if m.focus == "right" {
 				m = enterItem(m, false)
-			}
-
-		// ввод в терминале
-		case "backspace":
-			if m.focus == "terminal" && len(m.termInput) > 0 {
-				m.termInput = m.termInput[:len(m.termInput)-1]
-				m.termOutput[len(m.termOutput)-1] = "$ " + m.termInput
-			}
-		case "enter":
-			if m.focus == "terminal" {
-				cmd := strings.TrimSpace(m.termInput)
-				m.termOutput[len(m.termOutput)-1] = "$ " + m.termInput
-				if cmd != "" {
-					m.termOutput = append(m.termOutput, runCommand(cmd))
-					m.history = append(m.history, cmd)
-				}
-				m.termInput = ""
-				m.historyIndex = len(m.history)
-				m.termOutput = append(m.termOutput, "$ ")
-			}
-		default:
-			// ✅ Поддержка кириллицы и любых Unicode-символов
-			if m.focus == "terminal" && len(msg.Runes) > 0 {
-				m.termInput += string(msg.Runes)
-				m.termOutput[len(m.termOutput)-1] = "$ " + m.termInput
 			}
 		}
 	}
@@ -187,17 +234,18 @@ func (m model) View() string {
 	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.focus == "left", panelW, panelH)
 	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.focus == "right", panelW, panelH)
 
-	linesL := strings.Split(left, "\n")
-	linesR := strings.Split(right, "\n")
+	// combine panels line by line
+	ll := strings.Split(left, "\n")
+	rr := strings.Split(right, "\n")
 	var combined []string
-	for i := 0; i < len(linesL); i++ {
-		combined = append(combined, linesL[i]+"  "+linesR[i])
+	for i := 0; i < len(ll); i++ {
+		combined = append(combined, ll[i]+"  "+rr[i])
 	}
 	ui := strings.Join(combined, "\n")
 
-	// терминал снизу
+	// terminal below
 	termH := m.height - panelH - 2
-	terminal := renderTerminal(m.termOutput, termH, m.width, m.focus == "terminal")
+	terminal := renderTerminal(m.termOutput, m.termInput, m.termCursorPos, termH, m.width, m.focus == "terminal")
 
 	return ui + "\n" + terminal
 }
@@ -216,21 +264,21 @@ func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bo
 	var b strings.Builder
 	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
 
-	visibleFiles := files
+	visible := files
 	if len(files) > h-2 {
 		end := offset + (h - 2)
 		if end > len(files) {
 			end = len(files)
 		}
-		visibleFiles = files[offset:end]
+		visible = files[offset:end]
 	}
 
 	for i := 0; i < h-2; i++ {
 		var line string
-		if i < len(visibleFiles) {
+		if i < len(visible) {
 			idx := offset + i
-			name := visibleFiles[i].Name()
-			if visibleFiles[i].IsDir() {
+			name := visible[i].Name()
+			if visible[i].IsDir() {
 				name += "/"
 			}
 			line = fmt.Sprintf(" %s", name)
@@ -238,24 +286,22 @@ func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bo
 				line = yellow + ">" + line + reset
 			}
 		}
-		if runewidth.StringWidth(stripANSI(line)) > w-2 {
-			lineRunes := []rune(stripANSI(line))
-			line = string(lineRunes[:w-2])
+		clean := stripANSI(line)
+		if runewidth.StringWidth(clean) > w-2 {
+			line = truncateToWidth(clean, w-2)
 		}
 		pad := w - 2 - runewidth.StringWidth(stripANSI(line))
 		if pad < 0 {
 			pad = 0
 		}
-		b.WriteString(color + "|" + reset + line +
-			strings.Repeat(" ", pad) +
-			color + "|" + reset + "\n")
+		b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
 	}
 
 	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
 	return b.String()
 }
 
-func renderTerminal(output []string, h, w int, active bool) string {
+func renderTerminal(output []string, input []rune, cursor int, h, w int, active bool) string {
 	if h < 3 {
 		h = 3
 	}
@@ -266,16 +312,10 @@ func renderTerminal(output []string, h, w int, active bool) string {
 		color = green
 	}
 
-	rep := func(s string, n int) string {
-		if n <= 0 {
-			return ""
-		}
-		return strings.Repeat(s, n)
-	}
-
 	var b strings.Builder
-	b.WriteString(color + "+" + rep(border, w-2) + "+" + reset + "\n")
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
 
+	// вывод прошлых строк
 	start := 0
 	if len(output) > h-2 {
 		start = len(output) - (h - 2)
@@ -285,19 +325,29 @@ func renderTerminal(output []string, h, w int, active bool) string {
 	for _, line := range visible {
 		clean := stripANSI(line)
 		if runewidth.StringWidth(clean) > w-2 {
-			runes := []rune(clean)
-			clean = string(runes[:w-2])
+			clean = truncateToWidth(clean, w-2)
 		}
 		pad := w - 2 - runewidth.StringWidth(clean)
 		if pad < 0 {
 			pad = 0
 		}
-		b.WriteString(color + "|" + reset + clean +
-			strings.Repeat(" ", pad) +
-			color + "|" + reset + "\n")
+		b.WriteString(color + "|" + reset + clean + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
 	}
 
-	b.WriteString(color + "+" + rep(border, w-2) + "+" + reset)
+	// строка ввода с курсором
+	left := string(input[:min(cursor, len(input))])
+	right := string(input[min(cursor, len(input)):])
+	cursorLine := "$ " + left + "_" + right
+	if runewidth.StringWidth(cursorLine) > w-2 {
+		cursorLine = truncateFromRight(cursorLine, w-2)
+	}
+	pad := w - 2 - runewidth.StringWidth(stripANSI(cursorLine))
+	if pad < 0 {
+		pad = 0
+	}
+	b.WriteString(color + "|" + reset + cursorLine + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
+
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
 	return b.String()
 }
 
@@ -307,6 +357,7 @@ func runCommand(cmd string) string {
 		return ""
 	}
 
+	// builtins
 	switch parts[0] {
 	case "ls":
 		wd, _ := os.Getwd()
@@ -332,8 +383,7 @@ func runCommand(cmd string) string {
 		if len(parts) < 2 {
 			return "Использование: cd <dir>"
 		}
-		err := os.Chdir(parts[1])
-		if err != nil {
+		if err := os.Chdir(parts[1]); err != nil {
 			return "Ошибка: " + err.Error()
 		}
 		return ""
@@ -352,8 +402,7 @@ func runCommand(cmd string) string {
 		if len(parts) < 2 {
 			return "Использование: mkdir <dir>"
 		}
-		err := os.Mkdir(parts[1], 0755)
-		if err != nil {
+		if err := os.Mkdir(parts[1], 0755); err != nil {
 			return "Ошибка: " + err.Error()
 		}
 		return ""
@@ -362,18 +411,18 @@ func runCommand(cmd string) string {
 		if len(parts) < 2 {
 			return "Использование: touch <file>"
 		}
-		_, err := os.Create(parts[1])
+		f, err := os.Create(parts[1])
 		if err != nil {
 			return "Ошибка: " + err.Error()
 		}
+		_ = f.Close()
 		return ""
 
 	case "rm":
 		if len(parts) < 2 {
 			return "Использование: rm <file>"
 		}
-		err := os.Remove(parts[1])
-		if err != nil {
+		if err := os.Remove(parts[1]); err != nil {
 			return "Ошибка: " + err.Error()
 		}
 		return ""
@@ -393,8 +442,7 @@ func runCommand(cmd string) string {
 			return "Ошибка: " + err.Error()
 		}
 		defer out.Close()
-		_, err = io.Copy(out, in)
-		if err != nil {
+		if _, err := io.Copy(out, in); err != nil {
 			return "Ошибка: " + err.Error()
 		}
 		return ""
@@ -403,8 +451,7 @@ func runCommand(cmd string) string {
 		if len(parts) < 3 {
 			return "Использование: mv <src> <dst>"
 		}
-		err := os.Rename(parts[1], parts[2])
-		if err != nil {
+		if err := os.Rename(parts[1], parts[2]); err != nil {
 			return "Ошибка: " + err.Error()
 		}
 		return ""
@@ -413,7 +460,13 @@ func runCommand(cmd string) string {
 		return strings.Join(parts[1:], " ")
 
 	default:
-		return "Неизвестная команда: " + parts[0]
+		// try to execute external command
+		c := exec.Command(parts[0], parts[1:]...)
+		out, err := c.CombinedOutput()
+		if err != nil {
+			return "Ошибка: " + err.Error() + "\n" + string(out)
+		}
+		return string(out)
 	}
 }
 
@@ -466,6 +519,47 @@ func stripANSI(s string) string {
 	s = strings.ReplaceAll(s, gray, "")
 	s = strings.ReplaceAll(s, yellow, "")
 	return s
+}
+
+func truncateToWidth(s string, max int) string {
+	var b strings.Builder
+	w := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > max {
+			break
+		}
+		b.WriteRune(r)
+		w += rw
+	}
+	return b.String()
+}
+
+func truncateFromRight(s string, max int) string {
+	rs := []rune(s)
+	widths := make([]int, len(rs))
+	total := 0
+	for i, r := range rs {
+		w := runewidth.RuneWidth(r)
+		widths[i] = w
+		total += w
+	}
+	if total <= max {
+		return s
+	}
+	index := 0
+	for total > max && index < len(rs) {
+		total -= widths[index]
+		index++
+	}
+	return string(rs[index:])
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func main() {
