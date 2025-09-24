@@ -358,29 +358,75 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
 	return b.String()
 }
 
+// runCommand отвечает за выполнение команд в терминале.
+// Здесь добавлены: расширенный ls (с флагами -a, -l),
+// clear (очистка терминала), ping (проверка доступности адреса),
+// help (список всех поддерживаемых команд).
 func runCommand(cmd string) string {
 	parts := strings.Fields(cmd)
 	if len(parts) == 0 {
 		return ""
 	}
 
-	// builtins
 	switch parts[0] {
+
+	// Новый ls с поддержкой флагов -a и -l
 	case "ls":
-		wd, _ := os.Getwd()
+		showAll := false // -a
+		long := false    // -l
+		args := []string{}
+
+		for _, p := range parts[1:] {
+			if strings.HasPrefix(p, "-") {
+				if strings.Contains(p, "a") {
+					showAll = true
+				}
+				if strings.Contains(p, "l") {
+					long = true
+				}
+			} else {
+				args = append(args, p)
+			}
+		}
+
+		wd := ""
+		if len(args) > 0 {
+			wd = args[0]
+		} else {
+			wd, _ = os.Getwd()
+		}
+
 		files, err := os.ReadDir(wd)
 		if err != nil {
 			return "Ошибка: " + err.Error()
 		}
-		names := []string{}
+
+		var lines []string
 		for _, f := range files {
 			name := f.Name()
+			if !showAll && strings.HasPrefix(name, ".") {
+				continue
+			}
 			if f.IsDir() {
 				name += "/"
 			}
-			names = append(names, name)
+			if long {
+				info, err := f.Info()
+				if err != nil {
+					lines = append(lines, name)
+				} else {
+					size := fmt.Sprintf("%d", info.Size())
+					lines = append(lines, fmt.Sprintf("%-20s %10s", name, size))
+				}
+			} else {
+				lines = append(lines, name)
+			}
 		}
-		return strings.Join(names, "  ")
+		return strings.Join(lines, "\n")
+
+	// Очистка терминала (сброс history и вывод "$ ")
+	case "clear":
+		return "\f" // спецсимвол: в renderTerminal он очистит окно
 
 	case "pwd":
 		wd, _ := os.Getwd()
@@ -466,8 +512,37 @@ func runCommand(cmd string) string {
 	case "echo":
 		return strings.Join(parts[1:], " ")
 
+	// Пинг с вызовом системной утилиты
+	case "ping":
+		if len(parts) < 2 {
+			return "Использование: ping <host>"
+		}
+		c := exec.Command("ping", "-c", "4", parts[1])
+		out, err := c.CombinedOutput()
+		if err != nil {
+			return "Ошибка: " + err.Error() + "\n" + string(out)
+		}
+		return string(out)
+
+	// Справка
+	case "help":
+		return `Доступные команды:
+  ls [-a] [-l] [dir]   - список файлов
+  clear                - очистить экран
+  pwd                  - показать текущую директорию
+  cd <dir>             - сменить директорию
+  cat <file>           - показать содержимое файла
+  mkdir <dir>          - создать директорию
+  touch <file>         - создать пустой файл
+  rm <file>            - удалить файл
+  cp <src> <dst>       - копировать файл
+  mv <src> <dst>       - переместить/переименовать файл
+  echo <text>          - вывести текст
+  ping <host>          - проверить доступность адреса
+  help                 - показать эту справку`
+
 	default:
-		// try to execute external command
+		// Внешняя команда
 		c := exec.Command(parts[0], parts[1:]...)
 		out, err := c.CombinedOutput()
 		if err != nil {
