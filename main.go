@@ -22,12 +22,12 @@ const (
 type model struct {
 	width, height int
 
-	leftDir, rightDir   string
+	leftDir, rightDir string
 	leftFiles, rightFiles []os.DirEntry
 
 	cursorLeft, cursorRight int
 	offsetLeft, offsetRight int
-	activePane, focus       string // "left", "right", "terminal"
+	activePane, focus string // "left", "right", "terminal"
 
 	termInput     []rune
 	termCursorPos int
@@ -76,7 +76,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.termCursorPos = len(m.termInput)
 			}
 
-		// Left / Right with Alt = switch active panel
+		// Left / Right with Alt = switch active panel or normal navigation
 		case tea.KeyLeft:
 			if msg.Alt {
 				if m.focus != "terminal" {
@@ -183,33 +183,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyRunes:
 			if m.focus == "terminal" {
-				r := msg.Runes // []rune
+				r := msg.Runes // []rune (can be multirune for composed input)
 				before := append([]rune{}, m.termInput[:m.termCursorPos]...)
 				after := append([]rune{}, m.termInput[m.termCursorPos:]...)
-				m.termInput = append(before, append(r, after...)...)
+				new := append(before, append(r, after...)...)
+				m.termInput = new
 				m.termCursorPos += len(r)
 			}
 
 		case tea.KeyEnter:
 			if m.focus == "terminal" {
 				cmd := strings.TrimSpace(string(m.termInput))
+				// показываем введённую команду в выводе терминала
 				if cmd != "" {
-					// показываем введённую команду
 					m.termOutput = append(m.termOutput, "$ "+cmd)
 
-					// выполняем
 					result := runCommand(cmd)
 					if result != "" {
 						for _, line := range strings.Split(strings.TrimRight(result, "\n"), "\n") {
 							m.termOutput = append(m.termOutput, line)
 						}
 					}
-
-					// добавляем в историю
+					// add to history
 					m.history = append(m.history, cmd)
 				}
-
-				// сброс
+				// reset input
 				m.termInput = []rune{}
 				m.termCursorPos = 0
 				m.historyIndex = len(m.history)
@@ -234,12 +232,21 @@ func (m model) View() string {
 	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.focus == "left", panelW, panelH)
 	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.focus == "right", panelW, panelH)
 
-	// combine panels line by line
+	// combine panels line by line safely
 	ll := strings.Split(left, "\n")
 	rr := strings.Split(right, "\n")
+	maxLines := max(len(ll), len(rr))
 	var combined []string
-	for i := 0; i < len(ll); i++ {
-		combined = append(combined, ll[i]+"  "+rr[i])
+	for i := 0; i < maxLines; i++ {
+		leftLine := ""
+		rightLine := ""
+		if i < len(ll) {
+			leftLine = ll[i]
+		}
+		if i < len(rr) {
+			rightLine = rr[i]
+		}
+		combined = append(combined, leftLine+"  "+rightLine)
 	}
 	ui := strings.Join(combined, "\n")
 
@@ -315,7 +322,7 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
 	var b strings.Builder
 	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
 
-	// вывод прошлых строк
+	// visible output lines (reserve one line for input)
 	start := 0
 	if len(output) > h-2 {
 		start = len(output) - (h - 2)
@@ -334,7 +341,7 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
 		b.WriteString(color + "|" + reset + clean + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
 	}
 
-	// строка ввода с курсором
+	// input line with cursor
 	left := string(input[:min(cursor, len(input))])
 	right := string(input[min(cursor, len(input)):])
 	cursorLine := "$ " + left + "_" + right
@@ -557,6 +564,13 @@ func truncateFromRight(s string, max int) string {
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
