@@ -1,15 +1,16 @@
 package main
 
 import (
-    "fmt"
-    "io"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "strings"
-    "regexp"      // ← вот это добавь
-    tea "github.com/charmbracelet/bubbletea"
-    "github.com/mattn/go-runewidth"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const (
@@ -21,11 +22,11 @@ const (
 	cyan   = "\033[36m"
 )
 
-//var (
-//    dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // синий
-//    exeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // зелёный
- //   fileStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))  // белый (обычный файл)
-//)
+var (
+    dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // синий
+    exeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // зелёный
+    fileStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))  // белый (обычный файл)
+)
 
 type model struct {
 	width, height int
@@ -334,22 +335,9 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
     lines := []string{}
     for _, raw := range output {
         runes := []rune(raw)
-        for runewidth.StringWidth(string(runes)) > w-2 {
-            cut := 0
-            width := 0
-            for i, r := range runes {
-                rw := runewidth.RuneWidth(r)
-                if width+rw > w-2 {
-                    cut = i
-                    break
-                }
-                width += rw
-            }
-            if cut == 0 {
-                cut = len(runes)
-            }
-            lines = append(lines, string(runes[:cut]))
-            runes = runes[cut:]
+        for len(runes) > w-2 {
+            lines = append(lines, string(runes[:w-2]))
+            runes = runes[w-2:]
         }
         lines = append(lines, string(runes))
     }
@@ -362,12 +350,12 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
 
     // вывод содержимого
     for _, line := range lines {
-        clean := stripANSI(line)
-        pad := w - 2 - runewidth.StringWidth(clean)
+        pad := w - 2 - runewidth.StringWidth(stripANSI(line))
         if pad < 0 {
             pad = 0
         }
 
+        // теперь ВСЕГДА добиваем строку пробелами
         b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
     }
 
@@ -375,18 +363,13 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
     left := string(input[:min(cursor, len(input))])
     right := string(input[min(cursor, len(input)):])
     cursorLine := "$ " + left + "_" + right
-
-    cleanCursor := stripANSI(cursorLine)
-    if runewidth.StringWidth(cleanCursor) > w-2 {
+    if runewidth.StringWidth(cursorLine) > w-2 {
         cursorLine = truncateFromRight(cursorLine, w-2)
-        cleanCursor = stripANSI(cursorLine)
     }
-
-    pad := w - 2 - runewidth.StringWidth(cleanCursor)
+    pad := w - 2 - runewidth.StringWidth(stripANSI(cursorLine))
     if pad < 0 {
         pad = 0
     }
-
     b.WriteString(color + "|" + reset + cursorLine + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
 
     b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
@@ -436,13 +419,12 @@ func runCommand(cmd string) string {
             continue
         }
 
-        styled := reset + name + reset
+        styled := fileStyle.Render(name)
         if f.IsDir() {
-            styled = blue + name + "/" + reset
+            styled = dirStyle.Render(name + "/")
         } else if info, err := f.Info(); err == nil && info.Mode()&0111 != 0 {
-            styled = green + name + reset
+            styled = exeStyle.Render(name)
         }
-        
 
         if longFmt {
             info, _ := f.Info()
@@ -635,8 +617,13 @@ func parentDir(path string) string {
 }
 
 func stripANSI(s string) string {
-    re := regexp.MustCompile(`\x1b\[[0-9;]*m`)
-    return re.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, reset, "")
+	s = strings.ReplaceAll(s, green, "")
+	s = strings.ReplaceAll(s, gray, "")
+	s = strings.ReplaceAll(s, yellow, "")
+	s = strings.ReplaceAll(s, blue, "")
+	s = strings.ReplaceAll(s, cyan, "")
+	return s
 }
 
 func truncateToWidth(s string, max int) string {

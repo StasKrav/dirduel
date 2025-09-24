@@ -1,15 +1,16 @@
 package main
 
 import (
-    "fmt"
-    "io"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "strings"
-    "regexp"      // ← вот это добавь
-    tea "github.com/charmbracelet/bubbletea"
-    "github.com/mattn/go-runewidth"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const (
@@ -21,11 +22,11 @@ const (
 	cyan   = "\033[36m"
 )
 
-//var (
-//    dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // синий
-//    exeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // зелёный
- //   fileStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))  // белый (обычный файл)
-//)
+var (
+    dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // синий
+    exeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // зелёный
+    fileStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))  // белый (обычный файл)
+)
 
 type model struct {
 	width, height int
@@ -317,80 +318,53 @@ func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bo
 }
 
 func renderTerminal(output []string, input []rune, cursor int, h, w int, active bool) string {
-    if h < 3 {
-        h = 3
-    }
-    border := "-"
-    color := gray
-    if active {
-        border = "="
-        color = green
-    }
+	if h < 3 {
+		h = 3
+	}
+	border := "-"
+	color := gray
+	if active {
+		border = "="
+		color = green
+	}
 
-    var b strings.Builder
-    b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
+	var b strings.Builder
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
 
-    // --- перенос длинных строк ---
-    lines := []string{}
-    for _, raw := range output {
-        runes := []rune(raw)
-        for runewidth.StringWidth(string(runes)) > w-2 {
-            cut := 0
-            width := 0
-            for i, r := range runes {
-                rw := runewidth.RuneWidth(r)
-                if width+rw > w-2 {
-                    cut = i
-                    break
-                }
-                width += rw
-            }
-            if cut == 0 {
-                cut = len(runes)
-            }
-            lines = append(lines, string(runes[:cut]))
-            runes = runes[cut:]
-        }
-        lines = append(lines, string(runes))
-    }
+	// visible output lines (reserve one line for input)
+	start := 0
+	if len(output) > h-2 {
+		start = len(output) - (h - 2)
+	}
+	visible := output[start:]
 
-    // оставляем последние строки (по высоте терминала)
-    maxLines := h - 2
-    if len(lines) > maxLines {
-        lines = lines[len(lines)-maxLines:]
-    }
+	for _, line := range visible {
+		clean := stripANSI(line)
+		if runewidth.StringWidth(clean) > w-2 {
+			clean = truncateToWidth(clean, w-2)
+		}
+		pad := w - 2 - runewidth.StringWidth(clean)
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteString(color + "|" + reset + clean + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
+	}
 
-    // вывод содержимого
-    for _, line := range lines {
-        clean := stripANSI(line)
-        pad := w - 2 - runewidth.StringWidth(clean)
-        if pad < 0 {
-            pad = 0
-        }
+	// input line with cursor
+	left := string(input[:min(cursor, len(input))])
+	right := string(input[min(cursor, len(input)):])
+	cursorLine := "$ " + left + "_" + right
+	if runewidth.StringWidth(cursorLine) > w-2 {
+		cursorLine = truncateFromRight(cursorLine, w-2)
+	}
+	pad := w - 2 - runewidth.StringWidth(stripANSI(cursorLine))
+	if pad < 0 {
+		pad = 0
+	}
+	b.WriteString(color + "|" + reset + cursorLine + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
 
-        b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
-    }
-
-    // строка ввода с курсором
-    left := string(input[:min(cursor, len(input))])
-    right := string(input[min(cursor, len(input)):])
-    cursorLine := "$ " + left + "_" + right
-
-    cleanCursor := stripANSI(cursorLine)
-    if runewidth.StringWidth(cleanCursor) > w-2 {
-        cursorLine = truncateFromRight(cursorLine, w-2)
-        cleanCursor = stripANSI(cursorLine)
-    }
-
-    pad := w - 2 - runewidth.StringWidth(cleanCursor)
-    if pad < 0 {
-        pad = 0
-    }
-
-    b.WriteString(color + "|" + reset + cursorLine + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
-
-    b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
-    return b.String()
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
+	return b.String()
 }
 
 // runCommand отвечает за выполнение команд в терминале.
@@ -406,58 +380,88 @@ func runCommand(cmd string) string {
 	switch parts[0] {
 	// ls с флагами -a, -l, -1 (и их сочетаниями)
 	case "ls":
-    wd, _ := os.Getwd()
-    files, err := os.ReadDir(wd)
-    if err != nil {
-        return "Ошибка: " + err.Error()
-    }
+		showAll := false  // -a
+		longFmt := false  // -l
+		onePerLine := false // -1
+		targets := []string{}
 
-    names := []string{}
-    showAll := false
-    longFmt := false
-    onePerLine := false
+		// Разбор аргументов: флаги начинаются с '-', остальные — директории/файлы
+		for _, p := range parts[1:] {
+			if strings.HasPrefix(p, "-") && len(p) > 1 {
+				for _, ch := range p[1:] {
+					switch ch {
+					case 'a':
+						showAll = true
+					case 'l':
+						longFmt = true
+					case '1':
+						onePerLine = true
+					default:
+						// игнорируем неизвестные флаги (можно логировать)
+					}
+				}
+			} else {
+				targets = append(targets, p)
+			}
+		}
 
-    // разбор флагов
-    for _, f := range parts[1:] {
-        if f == "-a" {
-            showAll = true
-        } else if f == "-l" {
-            longFmt = true
-        } else if f == "-1" {
-            onePerLine = true
-        } else {
-            return "Неизвестный флаг: " + f
-        }
-    }
+		target := "."
+		if len(targets) > 0 {
+			target = targets[0]
+		}
 
-    for _, f := range files {
-        name := f.Name()
-        if !showAll && strings.HasPrefix(name, ".") {
-            continue
-        }
+		files, err := os.ReadDir(target)
+		if err != nil {
+			return "Ошибка: " + err.Error()
+		}
 
-        styled := reset + name + reset
-        if f.IsDir() {
-            styled = blue + name + "/" + reset
-        } else if info, err := f.Info(); err == nil && info.Mode()&0111 != 0 {
-            styled = green + name + reset
-        }
-        
+		var lines []string
+		for _, f := range files {
+			name := f.Name()
+			if !showAll && strings.HasPrefix(name, ".") {
+				continue
+			}
 
-        if longFmt {
-            info, _ := f.Info()
-            styled = fmt.Sprintf("%s\t%d", styled, info.Size())
-        }
+			// подготовим отображаемое имя с цветом
+			displayName := name
+			// добавим '/' для директорий в отображение
+			if f.IsDir() {
+				displayName = name + "/"
+				displayName = blue + displayName + reset
+			} else {
+				// попытаемся получить информацию для проверки исполняемости и других метаданных
+				info, _ := f.Info()
+				if info != nil && info.Mode()&0111 != 0 {
+					// исполняемый файл — зелёный
+					displayName = green + name + reset
+				} else {
+					// обычный файл — без цвета (или можно серый)
+					displayName = name
+				}
+			}
 
-        names = append(names, styled)
-    }
+			if longFmt {
+				info, err := f.Info()
+				perms := "??????????"
+				size := "?"
+				mod := "?"
+				if err == nil && info != nil {
+					perms = info.Mode().String()
+					size = fmt.Sprintf("%d", info.Size())
+					mod = info.ModTime().Format("2006-01-02 15:04:05")
+				}
+				// формат: права, размер, дата, имя(с цветом)
+				lines = append(lines, fmt.Sprintf("%-11s %8s %s %s", perms, size, mod, displayName))
+			} else {
+				lines = append(lines, displayName)
+			}
+		}
 
-    if onePerLine {
-        return strings.Join(names, "\n")
-    }
-    return strings.Join(names, "  ")
-
-
+		// Вывод: если -l или -1 — по одной строке, иначе попытаемся поставить через два пробела
+		if longFmt || onePerLine {
+			return strings.Join(lines, "\n")
+		}
+		return strings.Join(lines, "  ")
 
 	case "clear":
 		// Отдаём специальный маркер — в Update нужно обработать его и очистить m.termOutput.
@@ -635,8 +639,13 @@ func parentDir(path string) string {
 }
 
 func stripANSI(s string) string {
-    re := regexp.MustCompile(`\x1b\[[0-9;]*m`)
-    return re.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, reset, "")
+	s = strings.ReplaceAll(s, green, "")
+	s = strings.ReplaceAll(s, gray, "")
+	s = strings.ReplaceAll(s, yellow, "")
+	s = strings.ReplaceAll(s, blue, "")
+	s = strings.ReplaceAll(s, cyan, "")
+	return s
 }
 
 func truncateToWidth(s string, max int) string {
