@@ -47,6 +47,9 @@ type model struct {
 	termOutput    []string
 	history       []string
 	historyIndex  int
+	scrollOffset int
+
+	
 	
 }
 
@@ -77,6 +80,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.Type {
+		
 
 		// global
 		case tea.KeyCtrlC:
@@ -225,108 +229,108 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.termInput = []rune{}
 				m.termCursorPos = 0
 				m.historyIndex = len(m.history)
+				m.scrollOffset = 0 // сброс при вводе новой команды
 			} else if m.focus == "left" {
 				m = enterItem(m, true)
 			} else if m.focus == "right" {
 				m = enterItem(m, false)
 			}
+			case tea.KeyPgUp:
+    if m.focus == "terminal" {
+        if m.scrollOffset < len(m.termOutput) {
+            m.scrollOffset++
+        }
+    } else {
+
+        }
+
+case tea.KeyPgDown:
+    if m.focus == "terminal" {
+        if m.scrollOffset > 0 {
+            m.scrollOffset--
+        }
+    }
 		}
 	}
 	return m, nil
 }
 
 func (m model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Загрузка..."
-	}
+    if m.width == 0 || m.height == 0 {
+        return "Загрузка..."
+    }
 
-	panelW := m.width/2 - 2
-	panelH := m.height/2 + 4
+    var b strings.Builder
 
-	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.focus == "left", panelW, panelH)
-	right := renderPanel(m.rightDir, m.rightFiles, m.cursorRight, m.offsetRight, m.focus == "right", panelW, panelH)
+    // размеры панелей
+    panelW := m.width/2 - 2
+    panelH := m.height/2 - 1
 
-	// combine panels line by line safely
-	ll := strings.Split(left, "\n")
-	rr := strings.Split(right, "\n")
-	maxLines := max(len(ll), len(rr))
-	var combined []string
-	for i := 0; i < maxLines; i++ {
-		leftLine := ""
-		rightLine := ""
-		if i < len(ll) {
-			leftLine = ll[i]
-		}
-		if i < len(rr) {
-			rightLine = rr[i]
-		}
-		combined = append(combined, leftLine+"  "+rightLine)
-	}
-	ui := strings.Join(combined, "\n")
+    // левая панель
+    left := renderPanel(
+        m.leftDir,
+        m.leftFiles,
+        m.cursorLeft,
+        m.offsetLeft,
+        m.focus == "left",
+        panelW,
+        panelH,
+    )
 
-	// terminal below
-	termH := m.height - panelH - 2
-	terminal := renderTerminal(m.termOutput, m.termInput, m.termCursorPos, termH, m.width, m.focus == "terminal")
+    // правая панель
+    right := renderPanel(
+        m.rightDir,
+        m.rightFiles,
+        m.cursorRight,
+        m.offsetRight,
+        m.focus == "right",
+        panelW,
+        panelH,
+    )
 
-	return ui + "\n" + terminal
+    // объединение строк
+    ll := strings.Split(left, "\n")
+    rr := strings.Split(right, "\n")
+    maxLines := max(len(ll), len(rr))
+    var combined []string
+    for i := 0; i < maxLines; i++ {
+        lLine := ""
+        rLine := ""
+        if i < len(ll) {
+            lLine = ll[i]
+        }
+        if i < len(rr) {
+            rLine = rr[i]
+        }
+        combined = append(combined, lLine+"  "+rLine)
+    }
+    b.WriteString(strings.Join(combined, "\n"))
+
+    // вычисляем высоту терминала
+    termH := 3
+    if len(m.termOutput) > 0 {
+        maxH := m.height / 2
+        if maxH < 3 {
+            maxH = 3
+        }
+        needed := len(m.termOutput) + 2 // вывод + строка ввода
+        if needed < maxH {
+            termH = needed
+        } else {
+            termH = maxH
+        }
+    }
+
+    b.WriteString("\n")
+    b.WriteString(renderTerminal(m, termH, m.width))
+
+    return b.String()
 }
 
 func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bool, w, h int) string {
-	if w <= 2 {
-		w = 4
-	}
-	border := "-"
-	color := gray
-	if active {
-		border = "="
-		color = green
-	}
-
-	var b strings.Builder
-	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
-
-	visible := files
-	if len(files) > h-2 {
-		end := offset + (h - 2)
-		if end > len(files) {
-			end = len(files)
-		}
-		visible = files[offset:end]
-	}
-
-	for i := 0; i < h-2; i++ {
-		var line string
-		if i < len(visible) {
-			idx := offset + i
-			name := visible[i].Name()
-			if visible[i].IsDir() {
-				name += "/"
-			}
-			line = fmt.Sprintf(" %s", name)
-			if idx == cursor {
-				line = yellow + ">" + line + reset
-			}
-		}
-		clean := stripANSI(line)
-		if runewidth.StringWidth(clean) > w-2 {
-			line = truncateToWidth(clean, w-2)
-		}
-		pad := w - 2 - runewidth.StringWidth(stripANSI(line))
-		if pad < 0 {
-			pad = 0
-		}
-		b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
-	}
-
-	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
-	return b.String()
-}
-
-func renderTerminal(output []string, input []rune, cursor int, h, w int, active bool) string {
-    if h < 3 {
-        h = 3
+    if w <= 2 {
+        w = 4
     }
-
     border := "-"
     color := gray
     if active {
@@ -337,9 +341,62 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
     var b strings.Builder
     b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
 
+    visible := files
+    if len(files) > h-2 {
+        end := offset + (h - 2)
+        if end > len(files) {
+            end = len(files)
+        }
+        visible = files[offset:end]
+    }
+
+    for i := 0; i < h-2; i++ {
+        var line string
+        if i < len(visible) {
+            idx := offset + i
+            name := visible[i].Name()
+            if visible[i].IsDir() {
+                name += "/"
+            }
+            line = fmt.Sprintf(" %s", name)
+            if idx == cursor {
+                line = yellow + ">" + line + reset
+            }
+        }
+        clean := stripANSI(line)
+        if runewidth.StringWidth(clean) > w-2 {
+            line = truncateToWidth(clean, w-2)
+        }
+        pad := w - 2 - runewidth.StringWidth(stripANSI(line))
+        if pad < 0 {
+            pad = 0
+        }
+        b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
+    }
+
+    b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
+    return b.String()
+}
+
+
+func renderTerminal(m model, h, w int) string {
+    if h < 3 {
+        h = 3
+    }
+
+    border := "-"
+    color := gray
+    if m.focus == "terminal" {
+        border = "="
+        color = green
+    }
+
+    var b strings.Builder
+    b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
+
     // перенос длинных строк
     lines := []string{}
-    for _, raw := range output {
+    for _, raw := range m.termOutput {
         runes := []rune(raw)
         for runewidth.StringWidth(stripANSI(string(runes))) > w-2 {
             cut := 0
@@ -362,27 +419,33 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
     }
 
     maxLines := h - 2
-    if len(lines) > maxLines {
-        lines = lines[len(lines)-maxLines:]
+    total := len(lines)
+    start := total - maxLines - m.scrollOffset
+    if start < 0 {
+        start = 0
     }
+    end := start + maxLines
+    if end > total {
+        end = total
+    }
+    viewLines := lines[start:end]
 
-    // вывод содержимого (рамки цветные, контент ч/б)
-    for _, line := range lines {
+    // вывод содержимого
+    for _, line := range viewLines {
         clean := stripANSI(line)
         pad := w - 2 - runewidth.StringWidth(clean)
         if pad < 0 {
             pad = 0
         }
-        b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
+        b.WriteString(color + "|" + reset + clean + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
     }
 
-    // input line с терминальным курсором (ч/б)
-    left := string(input[:min(cursor, len(input))])
-    right := string(input[min(cursor, len(input)):])
-
+    // строка ввода
+    left := string(m.termInput[:min(m.termCursorPos, len(m.termInput))])
+    right := string(m.termInput[min(m.termCursorPos, len(m.termInput)):])
     var cursorLine string
-    if cursor < len(input) {
-        ch := string(input[cursor])
+    if m.termCursorPos < len(m.termInput) {
+        ch := string(m.termInput[m.termCursorPos])
         cursorLine = "$ " + left + "\033[7m" + ch + "\033[0m" + right
     } else {
         cursorLine = "$ " + left
@@ -390,7 +453,6 @@ func renderTerminal(output []string, input []rune, cursor int, h, w int, active 
             cursorLine += "\033[7m \033[0m"
         }
     }
-
     if runewidth.StringWidth(stripANSI(cursorLine)) > w-2 {
         cursorLine = truncateFromRight(cursorLine, w-2)
     }

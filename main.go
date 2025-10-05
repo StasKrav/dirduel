@@ -21,11 +21,6 @@ const (
 	cyan   = "\033[36m"
 )
 
-//var (
-//    dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // синий
-//    exeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // зелёный
- //   fileStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))  // белый (обычный файл)
-//)
 
 type model struct {
 	width, height int
@@ -234,7 +229,7 @@ func (m model) View() string {
 		return "Загрузка..."
 	}
 
-	panelW := m.width/2 - 2
+	panelW := m.width/2 - 1
 	panelH := m.height/2 + 4
 
 	left := renderPanel(m.leftDir, m.leftFiles, m.cursorLeft, m.offsetLeft, m.focus == "left", panelW, panelH)
@@ -260,7 +255,22 @@ func (m model) View() string {
 
 	// terminal below
 	termH := m.height - panelH - 2
-	terminal := renderTerminal(m.termOutput, m.termInput, m.termCursorPos, termH, m.width, m.focus == "terminal")
+
+	// активный терминал зелёный, иначе серый
+	color := gray
+	if m.focus == "terminal" {
+		color = green
+	}
+
+	terminal := renderTerminal(
+		m.termOutput,
+		m.termInput,
+		m.termCursorPos,
+		termH,
+		m.width,
+		color,
+		reset,
+	)
 
 	return ui + "\n" + terminal
 }
@@ -316,81 +326,92 @@ func renderPanel(path string, files []os.DirEntry, cursor, offset int, active bo
 	return b.String()
 }
 
-func renderTerminal(output []string, input []rune, cursor int, h, w int, active bool) string {
-    if h < 3 {
-        h = 3
-    }
-    border := "-"
-    color := gray
-    if active {
-        border = "="
-        color = green
-    }
+func renderTerminal(output []string, input []rune, cursor, h, w int, color, reset string) string {
+	if h < 3 {
+		h = 3
+	}
 
-    var b strings.Builder
-    b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
+	// рамка как раньше
+	border := "-"
+	if color == green {
+		border = "="
+	}
 
-    // --- перенос длинных строк ---
-    lines := []string{}
-    for _, raw := range output {
-        runes := []rune(raw)
-        for runewidth.StringWidth(string(runes)) > w-2 {
-            cut := 0
-            width := 0
-            for i, r := range runes {
-                rw := runewidth.RuneWidth(r)
-                if width+rw > w-2 {
-                    cut = i
-                    break
-                }
-                width += rw
-            }
-            if cut == 0 {
-                cut = len(runes)
-            }
-            lines = append(lines, string(runes[:cut]))
-            runes = runes[cut:]
-        }
-        lines = append(lines, string(runes))
-    }
+	var b strings.Builder
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset + "\n")
 
-    // оставляем последние строки (по высоте терминала)
-    maxLines := h - 2
-    if len(lines) > maxLines {
-        lines = lines[len(lines)-maxLines:]
-    }
+	// перенос длинных строк
+	lines := []string{}
+	for _, raw := range output {
+		runes := []rune(raw)
+		for runewidth.StringWidth(string(runes)) > w-2 {
+			cut := 0
+			width := 0
+			for i, r := range runes {
+				rw := runewidth.RuneWidth(r)
+				if width+rw > w-2 {
+					cut = i
+					break
+				}
+				width += rw
+			}
+			if cut == 0 {
+				cut = len(runes)
+			}
+			lines = append(lines, string(runes[:cut]))
+			runes = runes[cut:]
+		}
+		lines = append(lines, string(runes))
+	}
 
-    // вывод содержимого
-    for _, line := range lines {
-        clean := stripANSI(line)
-        pad := w - 2 - runewidth.StringWidth(clean)
-        if pad < 0 {
-            pad = 0
-        }
+	// оставляем последние строки (по высоте терминала)
+	maxLines := h - 2
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
 
-        b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
-    }
+	// вывод содержимого
+	for _, line := range lines {
+		clean := stripANSI(line)
+		pad := w - 2 - runewidth.StringWidth(clean)
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteString(color + "|" + reset + line + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
+	}
 
-    // строка ввода с курсором
-    left := string(input[:min(cursor, len(input))])
-    right := string(input[min(cursor, len(input)):])
-    cursorLine := "$ " + left + "_" + right
+	// строка ввода с "терминальным курсором"
+	left := string(input[:min(cursor, len(input))])
+	right := string(input[min(cursor, len(input)):])
 
-    cleanCursor := stripANSI(cursorLine)
-    if runewidth.StringWidth(cleanCursor) > w-2 {
-        cursorLine = truncateFromRight(cursorLine, w-2)
-        cleanCursor = stripANSI(cursorLine)
-    }
+	var cursorLine string
+	if cursor < len(input) {
+		// курсор на символе → инвертируем его
+		ch := string(input[cursor])
+		cursorLine = "$ " + left + "\033[7m" + ch + reset + right[1:]
+	} else {
+		// курсор в конце → инвертированный пробел
+		cursorLine = "$ " + left + "\033[7m \033[0m"
+	}
 
-    pad := w - 2 - runewidth.StringWidth(cleanCursor)
-    if pad < 0 {
-        pad = 0
-    }
+	cleanCursor := stripANSI(cursorLine)
+	if runewidth.StringWidth(cleanCursor) > w-2 {
+		cursorLine = truncateFromRight(cursorLine, w-2)
+		cleanCursor = stripANSI(cursorLine)
+	}
 
-    b.WriteString(color + "|" + reset + cursorLine + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
+	pad := w - 2 - runewidth.StringWidth(cleanCursor)
+	if pad < 0 {
+		pad = 0
+	}
+	b.WriteString(color + "|" + reset + cursorLine + strings.Repeat(" ", pad) + color + "|" + reset + "\n")
 
-    b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
-    return b.String()
+	b.WriteString(color + "+" + strings.Repeat(border, w-2) + "+" + reset)
+	return b.String()
+}
+
+func invert(s string) string {
+    return "\033[7m" + s + "\033[0m"
 }
 
 // runCommand отвечает за выполнение команд в терминале.

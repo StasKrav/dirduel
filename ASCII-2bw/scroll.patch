@@ -1,0 +1,63 @@
+--- a/main.go
++++ b/main.go
+@@
+ type model struct {
+     leftDir, rightDir string
+     leftFiles, rightFiles []os.DirEntry
+     cursorLeft, cursorRight int
+     offsetLeft, offsetRight int
+     width, height int
+     focus, activePane string
+     inputBuffer []rune
+     cursorPos int
+     editMode, inputMode bool
+     termOutput []string
+     termInput  []rune
+     termCursorPos int
+     history []string
+     historyIndex int
++    scrollOffset int // смещение для прокрутки терминала
+ }
+ 
+ func (m model) Init() tea.Cmd {
+     return nil
+ }
+ 
+ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+@@
+         case tea.KeyEnter:
+             if m.focus == "terminal" {
+                 cmd := strings.TrimSpace(string(m.termInput))
+                 if cmd != "" {
+                     m.termOutput = append(m.termOutput, "$ "+cmd)
+                     result := runCommand(cmd)
+                     if result != "" {
+                         for _, line := range strings.Split(strings.TrimRight(result, "\n"), "\n") {
+                             m.termOutput = append(m.termOutput, line)
+                         }
+                     }
+                     m.history = append(m.history, cmd)
+                 }
+                 m.termInput = []rune{}
+                 m.termCursorPos = 0
+                 m.historyIndex = len(m.history)
++                m.scrollOffset = 0 // сброс при вводе новой команды
+             } else if m.focus == "left" {
+                 m = enterItem(m, true)
+             } else if m.focus == "right" {
+                 m = enterItem(m, false)
+             }
++
++        case tea.KeyPgUp:
++            if m.focus == "terminal" && m.scrollOffset < len(m.termOutput) {
++                m.scrollOffset += 1
++            }
++
++        case tea.KeyPgDown:
++            if m.focus == "terminal" && m.scrollOffset > 0 {
++                m.scrollOffset -= 1
++            }
+         }
+     }
+     return m, nil
+ }
